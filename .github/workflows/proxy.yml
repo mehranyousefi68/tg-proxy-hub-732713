@@ -1,0 +1,121 @@
+name: Telegram MTProto Proxy
+
+# این ورک‌فلو توسط ربات پروکسی‌ساز اجرا می‌شود:
+# سرور mtg (MTProto + FakeTLS) را بالا می‌آورد و با تونل عمومی bore در دسترس قرار می‌دهد.
+# رمز پروکسی از repo secret با نام MTG_SECRET خوانده می‌شود و در لاگ‌ها مخفی (masked) می‌ماند.
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: tg-proxy
+  cancel-in-progress: true
+
+jobs:
+  run-proxy:
+    name: MTProto proxy + public tunnel
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+
+    steps:
+      - name: "📥 نصب mtg (سرور پروکسی MTProto)"
+        run: |
+          set -euo pipefail
+          URL=$(curl -fsSL https://api.github.com/repos/9seconds/mtg/releases/latest \
+            | jq -r '.assets[].browser_download_url' \
+            | grep -E 'linux-amd64\.tar\.gz$' | head -n1 || true)
+          if [ -z "$URL" ]; then
+            echo "::error::mtg linux-amd64 asset not found"
+            exit 1
+          fi
+          echo "Downloading: $URL"
+          curl -fsSL "$URL" -o mtg.tar.gz
+          tar -xzf mtg.tar.gz
+          if [ ! -f ./mtg ]; then
+            mv "$(find . -maxdepth 2 -type f -name mtg | head -n1)" ./mtg
+          fi
+          chmod +x ./mtg
+          ./mtg --version || true
+
+      - name: "📥 نصب bore (تونل TCP عمومی)"
+        run: |
+          set -euo pipefail
+          URL=$(curl -fsSL https://api.github.com/repos/ekzhang/bore/releases/latest \
+            | jq -r '.assets[].browser_download_url' \
+            | grep -E 'x86_64-unknown-linux' | head -n1 || true)
+          if [ -n "$URL" ]; then
+            echo "Downloading: $URL"
+            curl -fsSL "$URL" -o bore.tar.gz
+            tar -xzf bore.tar.gz
+            if [ ! -f ./bore ]; then
+              mv "$(find . -maxdepth 2 -type f -name bore | head -n1)" ./bore
+            fi
+          else
+            echo "Prebuilt binary not found; building from source..."
+            cargo install bore-cli --locked
+            cp "$HOME/.cargo/bin/bore" ./bore
+          fi
+          chmod +x ./bore
+          ./bore --version
+
+      - name: "🚀 اجرای سرور MTProto"
+        env:
+          MTG_SECRET: ${{ secrets.MTG_SECRET }}
+        run: |
+          set -euo pipefail
+          if [ -z "${MTG_SECRET:-}" ]; then
+            echo "::error::MTG_SECRET repo secret is missing"
+            exit 1
+          fi
+          {
+            echo 'secret = "'"$MTG_SECRET"'"'
+            echo 'bind-to = "0.0.0.0:1984"'
+          } > config.toml
+          chmod 600 config.toml
+          nohup ./mtg run config.toml > mtg.log 2>&1 &
+          sleep 3
+          if ! pgrep -f 'mtg run' >/dev/null; then
+            echo "::error::mtg failed to start"
+            tail -n 30 mtg.log || true
+            exit 1
+          fi
+          echo "✅ mtg is listening on 0.0.0.0:1984 (FakeTLS mode)"
+
+      - name: "🌐 برقراری تونل عمومی"
+        run: |
+          set -euo pipefail
+          nohup ./bore local 1984 --to bore.pub > bore.log 2>&1 &
+          PORT=""
+          for _ in $(seq 1 45); do
+            PORT=$(grep -oE 'bore\.pub:[0-9]+' bore.log | head -n1 | cut -d: -f2 || true)
+            if [ -n "$PORT" ]; then
+              break
+            fi
+            if ! pgrep -f 'bore local' >/dev/null; then
+              echo "::error::bore exited unexpectedly"
+              tail -n 30 bore.log || true
+              exit 1
+            fi
+            sleep 2
+          done
+          if [ -z "$PORT" ]; then
+            echo "::error::could not detect tunnel port"
+            tail -n 30 bore.log || true
+            exit 1
+          fi
+          echo "✅ Public tunnel is ready: bore.pub:$PORT" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: "⏳ نگه‌داشتن پروکسی (~۵ ساعت و ۵۰ دقیقه)"
+        run: |
+          END=$((SECONDS + 346 * 60))
+          while [ $SECONDS -lt $END ]; do
+            sleep 30
+            if ! pgrep -f 'mtg run' >/dev/null; then
+              echo "::error::mtg process died"
+              exit 1
+            fi
+            if ! pgrep -f 'bore local' >/dev/null; then
+              echo "::error::bore process died"
+              exit 1
+            fi
+          done
