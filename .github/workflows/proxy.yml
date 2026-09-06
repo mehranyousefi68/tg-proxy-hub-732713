@@ -82,6 +82,7 @@ jobs:
           echo "✅ mtg is listening on 0.0.0.0:1984 (FakeTLS mode)"
 
       - name: "🌐 برقراری تونل عمومی"
+        id: tunnel
         run: |
           set -euo pipefail
           nohup ./bore local 1984 --to bore.pub > bore.log 2>&1 &
@@ -103,7 +104,27 @@ jobs:
             tail -n 30 bore.log || true
             exit 1
           fi
+          echo "port=$PORT" >> "$GITHUB_OUTPUT"
           echo "✅ Public tunnel is ready: bore.pub:$PORT" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      # لاگ زندهٔ جابِ در حال اجرا از API گیت‌هاب خالی است؛ ربات پورت را از Artifact می‌خواند.
+      - name: "📤 انتشار پورت برای ربات"
+        if: success()
+        env:
+          TUNNEL_PORT: ${{ steps.tunnel.outputs.port }}
+        run: |
+          set -euo pipefail
+          echo "$TUNNEL_PORT" > tunnel_port.txt
+          echo "port file ready: $(cat tunnel_port.txt)"
+
+      - name: "📦 آپلود Artifact پورت"
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tunnel-port
+          path: tunnel_port.txt
+          retention-days: 1
+          if-no-files-found: error
 
       - name: "⏳ نگه‌داشتن پروکسی (~۵ ساعت و ۵۰ دقیقه)"
         run: |
