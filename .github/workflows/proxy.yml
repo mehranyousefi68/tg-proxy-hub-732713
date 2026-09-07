@@ -85,12 +85,18 @@ jobs:
 
       - name: "🌐 برقراری تونل عمومی"
         id: tunnel
+        env:
+          # سرور تونل (پیش‌فرض bore.pub)؛ ربات در صورت تنظیم TUNNEL_HOST این secret را ثبت می‌کند
+          TUNNEL_HOST: ${{ secrets.TUNNEL_HOST }}
         run: |
           set -euo pipefail
-          nohup ./bore local 1984 --to bore.pub > bore.log 2>&1 &
+          TUNNEL_TARGET="${TUNNEL_HOST:-bore.pub}"
+          echo "Tunnel target: $TUNNEL_TARGET"
+          nohup ./bore local 1984 --to "$TUNNEL_TARGET" > bore.log 2>&1 &
           PORT=""
+          ESC=$(printf '%s' "$TUNNEL_TARGET" | sed 's/[.]/\\./g')
           for _ in $(seq 1 45); do
-            PORT=$(grep -oE 'bore\.pub:[0-9]+' bore.log | head -n1 | cut -d: -f2 || true)
+            PORT=$(grep -oE "${ESC}:[0-9]+" bore.log | head -n1 | cut -d: -f2 || true)
             if [ -n "$PORT" ]; then
               break
             fi
@@ -107,7 +113,7 @@ jobs:
             exit 1
           fi
           echo "port=$PORT" >> "$GITHUB_OUTPUT"
-          echo "✅ Public tunnel is ready: bore.pub:$PORT" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "✅ Public tunnel is ready: $TUNNEL_TARGET:$PORT" | tee -a "$GITHUB_STEP_SUMMARY"
 
       # لاگ زندهٔ جابِ در حال اجرا از API گیت‌هاب خالی است؛ ربات پورت را از Artifact می‌خواند.
       - name: "📤 انتشار پورت برای ربات"
