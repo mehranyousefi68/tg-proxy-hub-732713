@@ -7,9 +7,11 @@ name: Telegram MTProto Proxy
 on:
   workflow_dispatch:
 
+# هر اجرا گروه همزمانی یکتای خودش را دارد تا ساخت پروکسی جدید،
+# پروکسی‌های فعال قبلی را لغو/متوقف نکند (پشتیبانی از چند پروکسی همزمان).
 concurrency:
-  group: tg-proxy
-  cancel-in-progress: true
+  group: tg-proxy-${{ github.run_id }}
+  cancel-in-progress: false
 
 jobs:
   run-proxy:
