@@ -6,6 +6,12 @@ name: Telegram MTProto Proxy
 
 on:
   workflow_dispatch:
+    inputs:
+      ir_tunnel:
+        description: "IR tunnel host (bore server on an Iranian IP) — empty = foreign only"
+        required: false
+        default: ""
+        type: string
 
 # هر اجرا گروه همزمانی یکتای خودش را دارد تا ساخت پروکسی جدید،
 # پروکسی‌های فعال قبلی را لغو/متوقف نکند (پشتیبانی از چند پروکسی همزمان).
@@ -125,6 +131,48 @@ jobs:
           echo "$TUNNEL_PORT" > tunnel_port.txt
           echo "port file ready: $(cat tunnel_port.txt)"
 
+      - name: "🇮🇷 تونل ایرانی (ورودی آیپی تمیز ایرانی)"
+        if: success() && inputs.ir_tunnel != ''
+        env:
+          IR_TUNNEL: ${{ inputs.ir_tunnel }}
+        run: |
+          set -euo pipefail
+          IRHOST="${IR_TUNNEL%%:*}"
+          echo "IR tunnel target: $IR_TUNNEL (host: $IRHOST)"
+          nohup ./bore local 1984 --to "$IR_TUNNEL" > bore_ir.log 2>&1 &
+          IRPORT=""
+          ESC=$(printf '%s' "$IRHOST" | sed 's/[.]/\\./g')
+          for _ in $(seq 1 45); do
+            IRPORT=$(grep -oE "${ESC}:[0-9]+" bore_ir.log | head -n1 | cut -d: -f2 || true)
+            if [ -n "$IRPORT" ]; then
+              break
+            fi
+            if ! pgrep -f 'bore_ir' >/dev/null && ! pgrep -f 'bore local' >/dev/null; then
+              echo "::warning::IR bore process exited unexpectedly"
+              tail -n 20 bore_ir.log || true
+              break
+            fi
+            sleep 2
+          done
+          if [ -z "$IRPORT" ]; then
+            # تونل ایرانی اختیاری است؛ نباید کل ساخت را شکست دهد
+            echo "::warning::IR tunnel port not detected — foreign entry stays the only entry"
+            tail -n 20 bore_ir.log || true
+            exit 0
+          fi
+          echo "$IRPORT" > tunnel_port_ir.txt
+          echo "IR_HOST=$IRHOST" >> "$GITHUB_ENV"
+          echo "✅ IR tunnel ready: $IRHOST:$IRPORT" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: "📦 آپلود Artifact پورت ایرانی"
+        if: success() && hashFiles('tunnel_port_ir.txt') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: tunnel-port-ir
+          path: tunnel_port_ir.txt
+          retention-days: 1
+          if-no-files-found: ignore
+
       - name: "📦 آپلود Artifact پورت"
         if: success()
         uses: actions/upload-artifact@v4
@@ -137,6 +185,10 @@ jobs:
       - name: "⏳ نگه‌داشتن پروکسی (~۵ ساعت و ۵۰ دقیقه)"
         run: |
           END=$((SECONDS + 346 * 60))
+          IR_STARTED=0
+          if [ -f tunnel_port_ir.txt ]; then
+            IR_STARTED=1
+          fi
           while [ $SECONDS -lt $END ]; do
             sleep 30
             if ! pgrep -f 'mtg run' >/dev/null; then
@@ -146,5 +198,12 @@ jobs:
             if ! pgrep -f 'bore local' >/dev/null; then
               echo "::error::bore process died"
               exit 1
+            fi
+            # تونل ایرانی اختیاری است — مرگش پروکسی را نمیکشد
+            if [ "$IR_STARTED" = "1" ]; then
+              IRCOUNT=$(pgrep -fc 'bore local' || true)
+              if [ "${IRCOUNT:-0}" -lt 2 ]; then
+                echo "::warning::IR bore tunnel died — foreign tunnel keeps serving"
+              fi
             fi
           done
